@@ -1,0 +1,24 @@
+{
+  "name": "codedraw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Draw editable visual assets with TypeScript and Bun, powered by Pi and an outer visual review loop.",
+  "packageManager": "bun@1.3.14",
+  "engines": { "bun": ">=1.3.14" },
+  "scripts": {
+    "test": "bun test tests/",
+    "typecheck": "bun node_modules/typescript/bin/tsc -p tsconfig.json",
+    "demo": "bun runtime/cli/demo.ts",
+    "codedraw": "bun runtime/cli/run.ts",
+    "test:pi": "CODEDRAW_TEST_PI=1 bun test tests/pi-smoke.test.ts"
+  },
+  "dependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "@earendil-works/pi-coding-agent": "0.84.2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pi itself runs under Bun; no global Node/Pi installation is required.
+SKILL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PI_CLI="$SKILL_ROOT/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
+if [[ ! -f "$PI_CLI" ]]; then
+  echo "codedraw: Pi is missing. Run bun install --cwd $SKILL_ROOT" >&2
+  exit 1
+fi
+exec "${CODEDRAW_BUN_BIN:-bun}" "$PI_CLI" "$@"

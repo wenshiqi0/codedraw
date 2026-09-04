@@ -1,0 +1,4 @@
+interface:
+  display_name: "CodeDraw"
+  short_description: "Draw assets with code using Pi and a visual review loop"
+  default_prompt: "Use $codedraw to generate an editable visual asset with code and review the rendered result."
