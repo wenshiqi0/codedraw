@@ -13,8 +13,8 @@ asset stays editable.
 
 ## Setup
 
-Resolve `<skill-root>` to the directory containing this file (follow a skill
-symlink). Commands work from any project; put task outputs in that project's
+Resolve `<skill-root>` to the directory containing this file. Commands work
+from any project; put task outputs in that project's
 `.codedraw/`, not inside the installed skill. Runs on macOS/Linux with Bun
 1.3.14+. Pi 0.84.2 is a pinned project dependency and runs under Bun too.
 
