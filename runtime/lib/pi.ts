@@ -82,6 +82,7 @@ export interface PiOptions {
   prompt: string;
   model: string | null;
   deadline: number;
+  references?: string[];
   onUsage(usage: Usage): void;
 }
 
@@ -93,15 +94,20 @@ export async function runPi(options: PiOptions): Promise<void> {
     "--append-system-prompt", options.systemPrompt,
   ];
   if (options.model) command.push("--model", options.model);
+  const referenceCount = options.references?.length ?? 0;
+  if (referenceCount) command.push("--extension", resolve(import.meta.dir, "pi-reference-guard.ts"));
+  for (const reference of options.references ?? []) command.push(`@${reference}`);
   command.push(options.prompt);
   let child;
   try {
-    child = Bun.spawn({ cmd: command, cwd: options.cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore", detached: true });
+    child = Bun.spawn({ cmd: command, cwd: options.cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore", detached: true,
+      env: { ...process.env, CODEDRAW_REFERENCE_COUNT: String(referenceCount) } });
   } catch {
     throw new Failure("executable_unavailable", "pi");
   }
   await beforeDeadline(child, options.deadline, "pi", async () => {
     let modelError = false;
+    let referenceReady = referenceCount === 0;
     let pending = "";
     let discarding = false;
     const decoder = new TextDecoder();
@@ -110,6 +116,7 @@ export async function runPi(options: PiOptions): Promise<void> {
       let event: unknown;
       try { event = JSON.parse(line); } catch { return; }
       if (!isRecord(event)) return;
+      if (event.type === "codedraw_reference_check") referenceReady = event.ready === true;
       if (event.type === "error") modelError = true;
       const message = event.message;
       if (event.type === "message_end" && isRecord(message) && message.role === "assistant") {
@@ -140,6 +147,7 @@ export async function runPi(options: PiOptions): Promise<void> {
       reader.releaseLock();
     }
     const code = await child.exited;
+    if (!referenceReady) throw new Failure("reference_images_unavailable", "pi", code);
     if (modelError) throw new Failure("model_error", "pi", code);
     if (code !== 0) throw new Failure("nonzero_exit", "pi", code);
   });

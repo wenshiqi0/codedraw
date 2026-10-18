@@ -2,12 +2,14 @@ import { expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { encodePng } from '../runtime/lib/images.ts';
+import { digest } from '../runtime/lib/storage.ts';
 
 const PROJECT = resolve(import.meta.dir, '..');
 const enabled = process.env.CODEDRAW_TEST_PI === '1';
 
 /** Actual bundled Pi and Bun execute against a local SSE stub. No remote model call. */
-(enabled ? test : test.skip)('real Pi → Bun drawing → rendering → candidate → explicit acceptance', async () => {
+(enabled ? test : test.skip).each([true, false])('real Pi with image support %s → guarded references → drawing and review', async (vision) => {
   const root = mkdtempSync(join(tmpdir(), 'codedraw-pi-smoke-'));
   const agentDir = join(root, 'agent');
   const taskDir = join(root, 'task');
@@ -15,7 +17,7 @@ const enabled = process.env.CODEDRAW_TEST_PI === '1';
   const source = `if (typeof Bun === 'undefined' || !Bun.version) throw new Error('Drawing runtime must be Bun');\nimport { writeFileSync } from 'node:fs';\nconst color: string = '#e53935';\nwriteFileSync('asset.svg', \`<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect x="12" y="12" width="40" height="40" fill="\${color}"/></svg>\`);\n`;
   const provider = 'codedraw-loopback-test';
   const model = 'deterministic-drawing-stub';
-  const requests: Array<{ model: string; stream: boolean; roles: string[]; tools: string[] }> = [];
+  const requests: Array<{ model: string; stream: boolean; roles: string[]; tools: string[]; images: string[]; hasStyle: boolean }> = [];
   const server = Bun.serve({
     hostname: '127.0.0.1', port: 0,
     async fetch(request) {
@@ -24,12 +26,15 @@ const enabled = process.env.CODEDRAW_TEST_PI === '1';
       }
       const input = await request.json() as {
         model: string; stream: boolean;
-        messages: Array<{ role: string }>;
+        messages: Array<{ role: string; content?: string | Array<{ type: string; image_url?: { url: string }; text?: string }> }>;
         tools: Array<{ function: { name: string } }>;
       };
       requests.push({ model: input.model, stream: input.stream,
         roles: input.messages.map(message => message.role),
-        tools: input.tools.map(tool => tool.function.name) });
+        tools: input.tools.map(tool => tool.function.name),
+        images: input.messages.flatMap(message => Array.isArray(message.content)
+          ? message.content.flatMap(block => block.type === 'image_url' && block.image_url ? [block.image_url.url] : []) : []),
+        hasStyle: JSON.stringify(input.messages).includes('local-style-v1') });
       const number = requests.length;
       if (number > 2) return new Response('Stub permits exactly two requests', { status: 500 });
       const base = { id: `chatcmpl-codedraw-${number}`, object: 'chat.completion.chunk', created: 1700000000, model };
@@ -60,7 +65,7 @@ const enabled = process.env.CODEDRAW_TEST_PI === '1';
   });
   writeFileSync(join(agentDir, 'models.json'), JSON.stringify({ providers: { [provider]: {
     baseUrl: `http://127.0.0.1:${server.port}/v1`, api: 'openai-completions', apiKey: 'local-stub-no-secret',
-    models: [{ id: model, name: 'Deterministic local test stub', reasoning: false, input: ['text'],
+    models: [{ id: model, name: 'Deterministic local test stub', reasoning: false, input: vision ? ['text', 'image'] : ['text'],
       contextWindow: 128000, maxTokens: 8192,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
@@ -69,8 +74,14 @@ const enabled = process.env.CODEDRAW_TEST_PI === '1';
   const brief = join(root, 'brief.txt');
   const review = join(root, 'review.txt');
   writeFileSync(brief, 'Create a red square with a transparent margin on a 64 by 64 canvas using draw.ts.');
+  const reference = encodePng({ width: 8, height: 8, data: Buffer.alloc(8 * 8 * 4, 255) });
+  const style = join(root, 'style.json');
+  writeFileSync(join(root, 'reference.png'), reference);
+  writeFileSync(style, JSON.stringify({ schema_version: 1, style_id: 'local-style-v1', medium: 'smooth',
+    reference_frames: [{ file: 'reference.png', role: 'sample', sha256: digest(reference) }],
+    sheet: { 'interface.*': 0.5 } }));
   writeFileSync(review, 'Deterministic integration fixture acceptance after PNG and render metadata checks; this is a protocol test, not model aesthetic evaluation.');
-  async function run(args: string[]) {
+  async function run(args: string[], expected = 0) {
     const proc = Bun.spawn([process.execPath, join(PROJECT, 'runtime/cli/run.ts'), ...args], {
       cwd: PROJECT, env, stdout: 'pipe', stderr: 'pipe',
     });
@@ -79,16 +90,27 @@ const enabled = process.env.CODEDRAW_TEST_PI === '1';
       const [stdout, stderr, code] = await Promise.all([
         new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
       ]);
-      expect({ code, diagnostics: code === 0 ? '' : stdout + stderr }).toEqual({ code: 0, diagnostics: '' });
+      expect({ code, diagnostics: code === expected ? '' : stdout + stderr }).toEqual({ code: expected, diagnostics: '' });
       return JSON.parse(stdout);
     } finally { clearTimeout(timer); }
   }
   try {
-    const candidate = await run(['exec', brief, '--output', taskDir, '--model', `${provider}/${model}`, '--timeout', '10']);
+    const candidate = await run(['exec', brief, '--output', taskDir, '--model', `${provider}/${model}`, '--timeout', '10',
+      '--style', style, '--asset-id', 'interface.sample'], vision ? 0 : 1);
+    if (!vision) {
+      expect(candidate.status).toBe('failed');
+      expect(candidate.rounds[0].failure.code).toBe('reference_images_unavailable');
+      expect(candidate.usage.calls).toBe(0);
+      expect(requests).toHaveLength(0);
+      return;
+    }
     expect(candidate.status).toBe('awaiting_review');
     expect(requests).toHaveLength(2);
     expect(requests.every(request => request.model === model && request.stream)).toBe(true);
     expect(requests[0]!.tools).toEqual(['read', 'write', 'edit', 'bash']);
+    expect(requests[0]!.hasStyle).toBe(true);
+    expect(requests[0]!.images).toHaveLength(1);
+    expect(requests[0]!.images[0]).toBe(`data:image/png;base64,${reference.toString('base64')}`);
     expect(requests[1]!.roles).toContain('tool');
     expect(readFileSync(join(taskDir, 'rounds/001/work/draw.ts'), 'utf8')).toBe(source);
     expect(candidate.usage).toEqual({ calls: 2, input: 210, output: 110,

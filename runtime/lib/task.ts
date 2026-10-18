@@ -10,9 +10,12 @@ import {
   pathExists, persist, readRegular, safePath, textInput, withTaskLock,
 } from "./storage.ts";
 import { runPi, runQuiet } from "./pi.ts";
+import { inputPrompt, loadInputs, prepareInputs, storeInputs, type InputOptions } from "./inputs.ts";
+import { writeSheet, type SheetReport } from "./sheet.ts";
 
 const ARTIFACT_NAMES: Record<ArtifactName, string> = {
   source: "work/draw.ts", asset: "work/asset.svg", preview: "preview.png", render: "render.json",
+  display: "display.png", display_report: "display.json",
 };
 
 const SYSTEM_PROMPT = `You are the inner drawing worker for CodeDraw. Implement the requested
@@ -37,14 +40,19 @@ to a PNG. Do not modify files outside this directory, task state, receipts, or r
 decisions. Reading an asset does not count as visually reviewing or accepting it.
 Do not report completion on behalf of the observer. Preserve editable code and follow
 the requested visual style, dimensions, and transparent background.
+The caller supplies art direction. Preserve supplied palette, grid, projection,
+light and density rules. Reference attachments are visual guidance only; do not
+embed or trace an entire reference screen into the deliverable. Production briefs
+can include a fixed style lock and bible; they do not select a different Pi model.
 `;
 
 function roundRelative(index: number): string {
   return `rounds/${String(index).padStart(3, "0")}`;
 }
 
-function artifactEntries(): [ArtifactName, string][] {
-  return Object.entries(ARTIFACT_NAMES) as [ArtifactName, string][];
+function artifactEntries(display = false): [ArtifactName, string][] {
+  return (Object.entries(ARTIFACT_NAMES) as [ArtifactName, string][])
+    .filter(([name]) => display || (name !== "display" && name !== "display_report"));
 }
 
 function initializeRound(root: string, task: Task, previous: Round | null, feedback: string | null): Round {
@@ -86,13 +94,16 @@ async function executeRound(root: string, task: Task, current: Round, feedback: 
   const deadline = performance.now() + task.timeout_seconds * 1000;
   const receipt: CandidateReceipt = { schema_version: 1, round: index, status: "drawing", usage: current.usage };
   try {
+    const inputs = loadInputs(root, task.inputs);
     let prompt = `Create the visual asset described below.\n\n${textInput(join(root, "brief.txt"))}`;
+    prompt += inputPrompt(root, inputs);
     if (feedback !== null) {
       prompt += `\n\nObserver feedback for this revision:\n\n${feedback}`;
       prompt += "\n\nPrevious draw.ts and asset.svg are present when available. Revise them to address the feedback.";
     }
     await runPi({
       cwd: work, systemPrompt: join(directory, "system.md"), prompt, model: task.model, deadline,
+      references: inputs?.references.map(reference => safePath(root, reference.artifact.path)),
       onUsage(usage) {
         current.usage = addUsage(current.usage, usage);
         persist(root, task);
@@ -111,8 +122,16 @@ async function executeRound(root: string, task: Task, current: Round, feedback: 
     readRegular(asset);
     const renderer = resolve(import.meta.dir, "../cli/render.ts");
     await runQuiet([process.execPath, renderer, asset, join(directory, "preview.png"), join(directory, "render.json")], work, deadline, "render");
-    const artifacts = Object.fromEntries(artifactEntries().map(([name, filename]) => [name, artifactRecord(root, `${relative}/${filename}`)])) as Artifacts;
-    Object.assign(receipt, { status: "awaiting_review", artifacts, finished_at: now() });
+    if (inputs?.display) {
+      try {
+        writeSheet([{ label: inputs.asset_id ?? "candidate", file: join(directory, "preview.png"),
+          scale: inputs.display.scale, medium: inputs.display.medium }], join(directory, "display.png"), join(directory, "display.json"));
+      } catch { throw new Failure("invalid_display", "display"); }
+      if (performance.now() >= deadline) throw new Failure("timeout", "display");
+    }
+    loadInputs(root, task.inputs);
+    const artifacts = Object.fromEntries(artifactEntries(!!inputs?.display).map(([name, filename]) => [name, artifactRecord(root, `${relative}/${filename}`)])) as Artifacts;
+    Object.assign(receipt, { status: "awaiting_review", artifacts, ...(task.inputs ? { inputs: task.inputs } : {}), finished_at: now() });
     current.status = task.status = "awaiting_review";
     emit(root, "candidate_ready", { round: index });
   } catch (error) {
@@ -130,7 +149,7 @@ async function executeRound(root: string, task: Task, current: Round, feedback: 
   }
 }
 
-export interface ExecOptions {
+export interface ExecOptions extends InputOptions {
   briefFile: string;
   output: string;
   model: string | null;
@@ -140,6 +159,7 @@ export interface ExecOptions {
 
 export async function begin(options: ExecOptions): Promise<Task> {
   const brief = textInput(options.briefFile);
+  const prepared = prepareInputs(options);
   const root = resolve(options.output);
   mkdirSync(dirname(root), { recursive: true });
   try { mkdirSync(root, { mode: 0o700 }); }
@@ -152,6 +172,7 @@ export async function begin(options: ExecOptions): Promise<Task> {
       schema_version: 1, id: randomUUID().replaceAll("-", ""), created_at: now(), updated_at: now(),
       status: "drawing", brief: "brief.txt", model: options.model, max_rounds: options.maxRounds,
       timeout_seconds: options.timeout, current_round: 1, rounds: [], usage: emptyUsage(),
+      ...(prepared ? { inputs: storeInputs(root, prepared) } : {}),
     };
     const current = initializeRound(root, task, null, null);
     await executeRound(root, task, current, null);
@@ -166,6 +187,7 @@ export async function revise(taskDirectory: string, feedbackFile: string): Promi
     const task = loadTask(root);
     if (task.status !== "awaiting_review" && task.status !== "failed") throw new CommandError("Only a finished, unaccepted round can be revised.");
     if (task.current_round >= task.max_rounds) throw new CommandError("Maximum rounds reached; create a new task to continue.");
+    loadInputs(root, task.inputs);
     const previous = task.rounds.at(-1);
     if (!previous) throw new CommandError("Invalid task round.");
     for (const name of ["source", "asset"] as const) {
@@ -179,7 +201,7 @@ export async function revise(taskDirectory: string, feedbackFile: string): Promi
   });
 }
 
-export async function accept(taskDirectory: string, reviewFile: string): Promise<Task> {
+export async function accept(taskDirectory: string, reviewFile: string, comparisonDirectory?: string): Promise<Task> {
   const review = textInput(reviewFile);
   const root = resolve(taskDirectory);
   return withTaskLock(root, async () => {
@@ -197,14 +219,40 @@ export async function accept(taskDirectory: string, reviewFile: string): Promise
     if (!isRecord(value) || value.status !== "awaiting_review" || value.round !== index || !isRecord(value.artifacts)) {
       throw new CommandError("Receipt is not a reviewable candidate.");
     }
+    const inputs = loadInputs(root, task.inputs);
+    if (task.inputs && (!isRecord(value.inputs) || value.inputs.sha256 !== task.inputs.sha256
+        || value.inputs.path !== task.inputs.path || value.inputs.bytes !== task.inputs.bytes)) {
+      throw new CommandError("Candidate input integrity check failed; acceptance refused.");
+    }
     const artifacts: Artifacts = {} as Artifacts;
-    for (const [name, filename] of artifactEntries()) {
+    for (const [name, filename] of artifactEntries(!!inputs?.display)) {
       const expected = value.artifacts[name];
       const actual = artifactRecord(root, `${relative}/${filename}`);
       if (!isRecord(expected) || expected.path !== actual.path || expected.sha256 !== actual.sha256 || expected.bytes !== actual.bytes) {
         throw new CommandError("Artifact integrity check failed; acceptance refused.");
       }
       artifacts[name] = actual;
+    }
+    let comparison: CompletedReceipt["comparison"];
+    if (comparisonDirectory) {
+      const comparisonRoot = resolve(comparisonDirectory);
+      ensureDirectory(comparisonRoot);
+      const reportBytes = readRegular(join(comparisonRoot, "sheet.json"));
+      const imageBytes = readRegular(join(comparisonRoot, "sheet.png"));
+      let report: SheetReport;
+      try { report = JSON.parse(reportBytes.toString("utf8")); }
+      catch { throw new CommandError("Invalid comparison sheet report."); }
+      if (report.schema_version !== 1 || report.png_sha256 !== digest(imageBytes) || !Array.isArray(report.rows)
+          || report.rows.length < 2 || !report.rows.some(row => row.source_sha256 === artifacts.preview.sha256)) {
+        throw new CommandError("Comparison must contain this exact candidate and a reference, with an intact sheet PNG.");
+      }
+      if (inputs?.display && !report.rows.some(row => row.source_sha256 === artifacts.preview.sha256
+          && row.scale === inputs.display!.scale && row.medium === inputs.display!.medium)) {
+        throw new CommandError("Comparison candidate must use the task's locked display scale and medium.");
+      }
+      atomicBytes(join(root, `${relative}/comparison.png`), imageBytes);
+      atomicBytes(join(root, `${relative}/comparison.json`), reportBytes);
+      comparison = { image: artifactRecord(root, `${relative}/comparison.png`), report: artifactRecord(root, `${relative}/comparison.json`) };
     }
     const reviewPath = `${relative}/review.txt`;
     atomicBytes(join(root, reviewPath), review);
@@ -215,6 +263,7 @@ export async function accept(taskDirectory: string, reviewFile: string): Promise
       schema_version: 1, status: "completed", task_id: task.id, round: index, accepted_at: task.completed_at,
       artifacts, review: current.review, usage: task.usage,
       candidate_receipt: artifactRecord(root, `${relative}/receipt.json`),
+      ...(task.inputs ? { inputs: task.inputs } : {}), ...(comparison ? { comparison } : {}),
     };
     atomicJson(join(root, "receipt.json"), finalReceipt);
     task.final_receipt = artifactRecord(root, "receipt.json");

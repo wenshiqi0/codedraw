@@ -23,6 +23,18 @@ Bun Runtime → Pi 编写 draw.ts → Bun 执行 → SVG → PNG
 
 Pi、绘图程序与渲染入口均由 Bun 执行。运行代码位于 `runtime/`，无需预编译。
 
+## 成套素材的画风一致性
+
+画风口径由使用方提供，使用方可以是用户、Codeflow 或其他宿主。提供参考图、已认可的素材或具体文字规范，并明确相关的配色、视角、比例、边缘处理、光照和显示尺寸。已有规范可以直接复用；缺失或冲突的口径由外层观察者反馈给使用方，补齐后再开始绘图。CodeDraw 不自行选定画风。[Brief 模板](assets/brief.template.md)列出了输入项。
+
+制作整套游戏素材时，先按这个口径画一小组能放在同一场景中比较的样张，例如角色、家具和地面，并按游戏实际显示尺寸查看。样张符合口径后，把相关绘图规则与 TypeScript 函数作为共同基准，再展开后续素材。
+
+每批都要与基准一起放入对比图或游戏场景中验收。图集格子齐全、物品可辨认和测试通过，都不能证明画面好看或画风统一。具体流程见[成套素材制作与验收](references/asset-sets.md)。
+
+Runtime 支持 `--style style.json --asset-id ID`：固定风格锁、相邻手册与 SHA 校验过的参考 PNG，每轮向 Pi 注入同一份规则并附上图片。`--reference` 可单独附图；带参考图时会检查模型的图像能力。设置显示倍率后自动输出棋盘格、暗底的实际尺寸预览。`completed` 表示观察者提交了验收文本且产物哈希通过校验，整组质量仍由观察者判断。
+
+使用 `codedraw sheet` 把基准与候选按各自显示倍率排在一起，查看后用 `accept --comparison` 将对照图和来源哈希纳入最终回执。完整选项、对照表格式与 HA 的 `art brief / sheet / frame` 接入见[生产输入与显示尺寸验收](references/production-inputs.md)。
+
 ## 快速开始
 
 运行环境：macOS 或 Linux，Bun 1.3.14 或更高版本。Pi 是项目固定版本依赖，由 `bun install` 安装。
@@ -92,7 +104,7 @@ CodeDraw 默认沿用 Pi 的模型配置；`exec --model <provider>/<model>` 可
 
 ### 1. 准备需求并生成
 
-Brief 描述主体、用途、尺寸、背景、风格、配色和可观察的验收要求。可以从[药水道具示例](assets/brief.example.md)开始：
+Brief 描述主体、用途、尺寸、背景，以及使用方提供的画风口径、配色和可观察的验收要求。使用[输入模板](assets/brief.template.md)整理实际需求；下面的[药水道具示例](assets/brief.example.md)包含一份完整文字口径，仅用于演示：
 
 ```bash
 ./runtime/bin/codedraw exec assets/brief.example.md \
@@ -103,6 +115,8 @@ Brief 描述主体、用途、尺寸、背景、风格、配色和可观察的�
 
 `--output` 必须是尚不存在的目录。`--max-rounds` 包含首次生成，默认共 3 轮；`--timeout` 是每轮 Pi、代码执行和渲染合计的秒数，默认 300 秒。每轮会启动新的 Pi 会话，后续轮次带上原始需求、上一轮源码和本轮反馈。
 
+项目已提供风格锁时，可增加 `--style path/to/style.json --asset-id interface.tag`；独立素材可增加 `--reference target.png --display-scale 0.5 --medium smooth`。使用参考图需要支持图像的 Pi 模型；像素素材用 `--medium pixel` 和整数倍率。每个任务固定输入快照，后续修改风格需要新建任务。
+
 ### 2. 查看结果
 
 ```bash
@@ -111,7 +125,7 @@ Brief 描述主体、用途、尺寸、背景、风格、配色和可观察的�
 ./runtime/bin/codedraw usage .codedraw/potion
 ```
 
-按状态中的当前轮次，打开对应的 `rounds/NNN/preview.png`；第一轮是 `.codedraw/potion/rounds/001/preview.png`。对照 brief 检查构图、轮廓、颜色、透明背景和目标显示尺寸下的辨识度。
+按状态中的当前轮次，打开对应的 `rounds/NNN/preview.png`；第一轮是 `.codedraw/potion/rounds/001/preview.png`。设置显示倍率后还要打开同轮 `display.png`，按 1:1 屏幕像素查看。对照 brief 检查构图、轮廓、颜色、透明背景和目标显示尺寸下的辨识度。
 
 事件以 NDJSON 输出；后续读取将最后一个事件的 `seq` 传给 `--since`。用量按任务和轮次汇总 calls、input、output、cache-read、cache-write、reasoning 和 total，缺失的 reasoning 为 `null`。这些数据覆盖内层 Pi 调用。
 

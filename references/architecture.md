@@ -10,10 +10,13 @@ run directly in Bun. There is no build step or separate Node/Python runtime.
 runtime/
   bin/codedraw              shell entrypoint → Bun CLI
   bin/pi                    pinned Pi CLI → Bun
-  cli/run.ts                exec / status / events / usage / revise / accept
+  cli/run.ts                exec / sheet / status / events / usage / revise / accept
   cli/render.ts             SVG → PNG command
   cli/demo.ts               deterministic offline example
   lib/                      task state, artifacts, processes, events, usage
+    inputs.ts               style/bible/reference snapshots and prompt injection
+    images.ts, sheet.ts      raster sampling and display-size comparison evidence
+    pi-reference-guard.ts    selected-model/image-count check before provider calls
   render/svg.ts             typed renderer and technical checks
   templates/draw.example.ts editable example drawing program
 tests/                      bun:test suites and fixtures
@@ -41,6 +44,19 @@ Pi writes drawing code; CodeDraw re-executes it and renders independently.
 The observer evaluates pixels against the brief and decides whether to request
 another round. The runtime itself does not make a visual judgment.
 
+The caller supplies art direction; the observer checks the required input in
+`SKILL.md` before invoking Pi. The CLI does not validate that text-level contract.
+For related assets, the observer follows [the asset-set workflow](asset-sets.md):
+test the supplied direction on a representative sample, include shared drawing conventions
+and TypeScript in each text brief, and compare candidates together at intended
+display sizes. Optional production inputs are described in
+[production-inputs.md](production-inputs.md): `--style` snapshots the JSON lock,
+adjacent bible and SHA-checked reference PNGs; `--reference` attaches standalone
+PNGs. Display scale comes from a selected asset's `sheet` rule or an explicit
+option. Input integrity is checked on each revision and acceptance. The observer
+still manages the baseline across tasks; a task receipt does not prove set-wide
+consistency.
+
 The source comparison used Codeflow commit
 `2c04565aae5187638150e581e311c05a8ec604fc`, particularly `runtime/bin/codeflow`,
 `runtime/bin/pi`, `runtime/cli/run.ts`, and the usage ledger. CodeDraw retains
@@ -64,6 +80,19 @@ Codeflow's Goal DAG or Worker coordination.
 - Each candidate receipt binds `draw.ts`, `asset.svg`, `preview.png`, and
   `render.json` to SHA-256 hashes. A revision copies source into a new round;
   the previous candidate evidence remains intact.
+- With production inputs, `task.inputs` and each candidate/final receipt bind
+  `inputs/manifest.json`; that manifest binds the brief and copied style, bible
+  and reference files. These are additive optional fields; ordinary text tasks
+  keep their existing artifact set. An externally changed direction needs a new task.
+- With a display plan, `display.png` and `display.json` are also candidate
+  artifacts, sampled from the delivered raster using nearest for pixel art or
+  premultiplied-alpha area filtering for smooth art. Sheets are limited to 4096
+  pixels per dimension. This does not validate GPU mipmap upload or scene fit.
+- `sheet` takes a JSON image list with a display scale and medium per row and
+  writes `sheet.png` / `sheet.json`. `accept --comparison` checks that the exact
+  current candidate appears beside a reference, at its locked scale when set,
+  and retains copies and hashes in `CompletedReceipt.comparison`. Source image
+  hashes and row positions preserve what the comparison showed.
 
 ## State and acceptance
 
@@ -81,7 +110,11 @@ never completes a task.
 
 `accept` preserves the candidate receipt, verifies all artifact hashes, saves
 the observer's review, and writes the final task-level `receipt.json`. Its hash
-and path are stored in `task.json`.
+and path are stored in `task.json`. It requires nonempty review text but does not
+verify image-viewing actions or the substance of the observer's visual judgment.
+Production input and display hashes are checked as well. Comparison evidence is
+optional at the CLI boundary; the asset-set workflow requires the observer to
+provide it for a set. It is not a runtime aesthetic verdict or installation gate.
 
 State writes use temporary files and atomic renames. Mutations hold an exclusive
 `.exclusive/` directory with an owner record. Concurrent or stale ownership is
@@ -93,6 +126,14 @@ remaining subprocesses before recovering an interrupted task. Read-only
 
 The runtime starts Pi in JSON print mode with a fresh ephemeral session each
 round. Skill/extension/prompt/context discovery is disabled for the artist.
+When references are supplied, the runtime explicitly loads its own small input
+guard. It checks the selected model's image capability and the processed image
+count before allowing a provider call, then emits a bounded readiness record.
+Pi deliberately continues after a thrown extension error, so rejection uses its
+`handled` input action. A missing/negative guard record fails the round with
+`reference_images_unavailable`; there is no text-only fallback. References are
+passed as Pi `@file` arguments each round. Pi may resize them according to its
+image processing settings; the manifest hashes the original supplied PNGs.
 Pi's read/write/edit/bash tools remain available for writing and debugging the
 TypeScript drawing. `--model <provider>/<model>` overrides only this task;
 without it, Pi uses the user's own configuration. Credentials remain in Pi's

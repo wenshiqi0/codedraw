@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /** Protocol fixture: fake model events, real drawing source executed by Bun. */
 import { existsSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 const args = process.argv.slice(2);
 const mode = process.env.FAKE_MODE ?? 'success';
@@ -16,7 +17,18 @@ if (process.env.EXPECT_MODEL) {
   check(!args.includes('--model'), 'Unexpected model override');
 }
 check(existsSync(args[args.indexOf('--append-system-prompt') + 1]!), 'System prompt file missing');
+if (process.env.EXPECT_STYLE_ID) {
+  check(args.at(-1)?.includes(process.env.EXPECT_STYLE_ID), 'Style snapshot not injected');
+  check(args.at(-1)?.includes('Frozen paper #c8bfa8'), 'Style bible not injected');
+}
+if (process.env.EXPECT_REFERENCE_SHA) {
+  const references = args.filter(arg => arg.startsWith('@'));
+  check(references.length === 1, 'Expected exactly one image attachment');
+  check(createHash('sha256').update(readFileSync(references[0]!.slice(1))).digest('hex') === process.env.EXPECT_REFERENCE_SHA,
+    'Reference bytes did not reach Pi');
+}
 const emit = (event: unknown) => process.stdout.write(`${JSON.stringify(event)}\n`);
+if (args.some(arg => arg.startsWith('@'))) emit({ type: 'codedraw_reference_check', ready: true });
 if (mode === 'timeout') {
   emit({ type: 'agent_start' });
   if (process.env.FAKE_STARTED_MARKER) {

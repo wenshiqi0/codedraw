@@ -16,8 +16,9 @@ export interface Artifact {
   bytes: number;
 }
 
-export type ArtifactName = "source" | "asset" | "preview" | "render";
-export type Artifacts = Record<ArtifactName, Artifact>;
+export type ArtifactName = "source" | "asset" | "preview" | "render" | "display" | "display_report";
+export type Artifacts = Record<"source" | "asset" | "preview" | "render", Artifact>
+  & Partial<Record<"display" | "display_report", Artifact>>;
 
 export interface FailureRecord {
   code: string;
@@ -54,6 +55,7 @@ export interface Task {
   usage: Usage;
   completed_at?: string;
   final_receipt?: Artifact;
+  inputs?: Artifact;
 }
 
 export interface CandidateReceipt {
@@ -62,6 +64,7 @@ export interface CandidateReceipt {
   status: Exclude<TaskStatus, "completed">;
   usage: Usage;
   artifacts?: Artifacts;
+  inputs?: Artifact;
   failure?: FailureRecord;
   finished_at?: string;
 }
@@ -76,6 +79,8 @@ export interface CompletedReceipt {
   review: Artifact;
   usage: Usage;
   candidate_receipt: Artifact;
+  inputs?: Artifact;
+  comparison?: { image: Artifact; report: Artifact };
 }
 
 export interface EventMetadata {
